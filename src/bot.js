@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { getStore, updateStore } from "./store.js";
 import { bindTicket, ticketForUser, spendTicket } from "./tickets.js";
-import { planPlaces, formatPlaceLine } from "./places.js";
+import { planPlaces, formatPlaceLine, mapsSearchLink, fallbackMapsQuery } from "./places.js";
 
 const adventure = JSON.parse(
   fs.readFileSync(path.resolve("adventures/soft-return.json"), "utf8")
@@ -83,6 +83,13 @@ export function createBot(token) {
         startedAt: Date.now(),
       };
     });
+
+    const found = Object.values(places).filter(Boolean).length;
+    if (found) {
+      await ctx.reply(`Знайшов ${found} точк${found === 1 ? "у" : "и"} поруч. Починаємо.`);
+    } else {
+      await ctx.reply("Конкретні точки зараз не підтягнулись. Дам кроки з пошуком на карті.");
+    }
 
     await sendStep(ctx, telegramId);
   });
@@ -164,14 +171,22 @@ async function sendStep(ctx, telegramId) {
   let text = step.text;
   if (step.place_key) {
     const place = session.places?.[step.place_key];
-    const line = place ? formatPlaceLine(place) : step.fallback || "Знайди місце сам.";
+    const line = place
+      ? formatPlaceLine(place)
+      : step.fallback || "Знайди місце сам. Є кнопка пошуку на карті.";
     text = text.replace("{place_line}", line);
   }
 
   const buttons = [];
   if (step.type === "LOCATION") {
     const place = session.places?.[step.place_key];
-    if (place?.maps) buttons.push([Markup.button.url("Відкрити шлях", place.maps)]);
+    const origin = session.start;
+    if (place?.maps) {
+      buttons.push([Markup.button.url("Відкрити шлях", place.maps)]);
+    } else {
+      const q = fallbackMapsQuery(step.place_key);
+      buttons.push([Markup.button.url("Знайти на карті", mapsSearchLink(q, origin))]);
+    }
     buttons.push([Markup.button.callback(step.button || "Я тут", "here")]);
   } else if (step.type === "INPUT") {
     buttons.push([Markup.button.callback(step.button || "Далі", "next")]);
