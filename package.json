@@ -1,0 +1,19 @@
+{
+  "name": "adventure-engine",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Пригоди на замовлення — сайт + Telegram-бот + квитки + місця",
+  "scripts": {
+    "start": "node src/index.js",
+    "ticket": "node src/create-ticket.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.7",
+    "express": "^5.1.0",
+    "telegraf": "^4.16.3"
+  }
+}
