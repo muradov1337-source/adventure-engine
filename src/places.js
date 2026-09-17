@@ -1,35 +1,11 @@
-const OVERPASS_ENDPOINTS = [
-  "https://overpass-api.de/api/interpreter",
-  "https://overpass.kumi.systems/api/interpreter",
-];
+const OVERPASS = "https://overpass.kumi.systems/api/interpreter";
+const FETCH_MS = 6000;
+const PLAN_MS = 9000;
 
 const QUERIES = {
-  cafe: (lat, lon, r) => `
-    [out:json][timeout:25];
-    (
-      nwr["amenity"="cafe"](around:${r},${lat},${lon});
-      nwr["amenity"="coffee_shop"](around:${r},${lat},${lon});
-      nwr["amenity"="fast_food"]["cuisine"~"coffee|tea",i](around:${r},${lat},${lon});
-    );
-    out center 12;
-  `,
-  bench: (lat, lon, r) => `
-    [out:json][timeout:25];
-    (
-      node["amenity"="bench"](around:${r},${lat},${lon});
-      node["leisure"="park"](around:${r},${lat},${lon});
-    );
-    out center 12;
-  `,
-  water: (lat, lon, r) => `
-    [out:json][timeout:25];
-    (
-      nwr["amenity"="fountain"](around:${r},${lat},${lon});
-      node["natural"="water"](around:${r},${lat},${lon});
-      node["natural"="spring"](around:${r},${lat},${lon});
-    );
-    out center 12;
-  `,
+  cafe: (lat, lon, r) => `[out:json][timeout:5];(node["amenity"="cafe"](around:${r},${lat},${lon}););out center 5;`,
+  bench: (lat, lon, r) => `[out:json][timeout:5];(node["amenity"="bench"](around:${r},${lat},${lon});node["leisure"="park"](around:${r},${lat},${lon}););out center 5;`,
+  water: (lat, lon, r) => `[out:json][timeout:5];(node["amenity"="fountain"](around:${r},${lat},${lon}););out center 5;`,
 };
 
 function distM(a, b) {
@@ -65,6 +41,15 @@ function defaultName(category) {
   return "місце поруч";
 }
 
+async function fetchJson(url, options = {}) {
+  const res = await fetch(url, {
+    ...options,
+    signal: AbortSignal.timeout(FETCH_MS),
+  });
+  if (!res.ok) throw new Error(`http ${res.status}`);
+  return res.json();
+}
+
 function normalizeElement(el, origin, category) {
   const lat = el.lat || el.center?.lat;
   const lon = el.lon || el.center?.lon;
@@ -86,66 +71,19 @@ function normalizeElement(el, origin, category) {
 async function overpassSearch(category, lat, lon, radius) {
   const builder = QUERIES[category];
   if (!builder) return [];
-  const body = builder(lat, lon, radius);
+  const json = await fetchJson(OVERPASS, {
+    method: "POST",
+    headers: {
+      "Content-Type": "text/plain",
+      "User-Agent": "adventure-engine/0.3",
+    },
+    body: builder(lat, lon, radius),
+  });
   const origin = { lat, lon };
-
-  for (const endpoint of OVERPASS_ENDPOINTS) {
-    try {
-      const res = await fetch(endpoint, {
-        method: "POST",
-        headers: {
-          "Content-Type": "text/plain",
-          "User-Agent": "adventure-engine/0.2",
-        },
-        body,
-      });
-      if (!res.ok) continue;
-      const json = await res.json();
-      const list = (json.elements || [])
-        .map((el) => normalizeElement(el, origin, category))
-        .filter(Boolean)
-        .sort((a, b) => a.meters - b.meters);
-      if (list.length) return list;
-    } catch (err) {
-      console.error("overpass fail", endpoint, err.message);
-    }
-  }
-  return [];
-}
-
-async function nominatimSearch(query, lat, lon) {
-  const url = new URL("https://nominatim.openstreetmap.org/search");
-  url.searchParams.set("q", query);
-  url.searchParams.set("format", "json");
-  url.searchParams.set("limit", "5");
-  url.searchParams.set("lat", String(lat));
-  url.searchParams.set("lon", String(lon));
-  try {
-    const res = await fetch(url, {
-      headers: { "User-Agent": "adventure-engine/0.2" },
-    });
-    if (!res.ok) return [];
-    const json = await res.json();
-    const origin = { lat, lon };
-    return (json || []).map((el) => {
-      const plat = Number(el.lat);
-      const plon = Number(el.lon);
-      const meters = Math.round(distM(origin, { lat: plat, lon: plon }));
-      return {
-        name: el.display_name?.split(",")[0] || query,
-        lat: plat,
-        lon: plon,
-        meters,
-        minutes: walkMin(meters),
-        maps: mapsPlaceLink(plat, plon, el.display_name),
-        category: query,
-        exact: true,
-      };
-    });
-  } catch (err) {
-    console.error("nominatim fail", err.message);
-    return [];
-  }
+  return (json.elements || [])
+    .map((el) => normalizeElement(el, origin, category))
+    .filter(Boolean)
+    .sort((a, b) => a.meters - b.meters);
 }
 
 export function formatPlaceLine(place) {
@@ -155,25 +93,39 @@ export function formatPlaceLine(place) {
 
 export function fallbackMapsQuery(category) {
   if (category === "cafe") return "кафе";
-  if (category === "bench") return "лавка OR парк";
-  if (category === "water") return "фонтан OR озеро";
+  if (category === "bench") return "парк";
+  if (category === "water") return "фонтан";
   return "місце";
+}
+
+async function withBudget(promise, ms) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), ms)),
+  ]);
 }
 
 export async function planPlaces(origin, needed) {
   const planned = {};
-  let from = origin;
-
-  for (const need of needed) {
-    let found = await overpassSearch(need.category, from.lat, from.lon, need.radius_m);
-    if (!found.length) {
-      const q = need.category === "cafe" ? "cafe" : need.category === "bench" ? "park" : "fountain";
-      found = await nominatimSearch(q, from.lat, from.lon);
-    }
-    const pick = found[0] || null;
-    planned[need.key] = pick;
-    if (pick) from = { lat: pick.lat, lon: pick.lon };
+  try {
+    const jobs = needed.map(async (need) => {
+      try {
+        const found = await overpassSearch(
+          need.category,
+          origin.lat,
+          origin.lon,
+          need.radius_m || 1200
+        );
+        return [need.key, found[0] || null];
+      } catch (err) {
+        console.error("place search", need.key, err.message);
+        return [need.key, null];
+      }
+    });
+    const pairs = await withBudget(Promise.all(jobs), PLAN_MS);
+    for (const [key, value] of pairs) planned[key] = value;
+  } catch (err) {
+    console.error("planPlaces", err.message);
   }
-
   return planned;
 }

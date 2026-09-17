@@ -61,34 +61,37 @@ export function createBot(token) {
     }
 
     const loc = ctx.message.location;
-    await ctx.reply("Збираю маршрут під тебе. Хвилина…", Markup.removeKeyboard());
-
-    let places = {};
-    try {
-      places = await planPlaces(
-        { lat: loc.latitude, lon: loc.longitude },
-        adventure.places_needed
-      );
-    } catch (err) {
-      console.error(err);
-    }
+    const start = { lat: loc.latitude, lon: loc.longitude };
 
     updateStore((s) => {
       s.sessions[telegramId] = {
         adventureId: adventure.id,
         step: 0,
-        start: { lat: loc.latitude, lon: loc.longitude },
-        places,
+        start,
+        places: {},
         answers: [],
         startedAt: Date.now(),
       };
     });
 
+    await ctx.reply("Ок, старт зафіксовано. Шукаю точки поруч — якщо не встигну, дам карту.", Markup.removeKeyboard());
+
+    let places = {};
+    try {
+      places = await planPlaces(start, adventure.places_needed || []);
+    } catch (err) {
+      console.error(err);
+    }
+
+    updateStore((s) => {
+      if (s.sessions[telegramId]) s.sessions[telegramId].places = places;
+    });
+
     const found = Object.values(places).filter(Boolean).length;
     if (found) {
-      await ctx.reply(`Знайшов ${found} точк${found === 1 ? "у" : "и"} поруч. Починаємо.`);
+      await ctx.reply(`Знайшов ${found} точк${found === 1 ? "у" : "и"} поруч.`);
     } else {
-      await ctx.reply("Конкретні точки зараз не підтягнулись. Дам кроки з пошуком на карті.");
+      await ctx.reply("Конкретну адресу зараз не знайшов. На кроках з місцем буде кнопка карти.");
     }
 
     await sendStep(ctx, telegramId);
