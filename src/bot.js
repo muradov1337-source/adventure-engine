@@ -9,6 +9,8 @@ const adventure = JSON.parse(
   fs.readFileSync(path.resolve("adventures/soft-return.json"), "utf8")
 );
 
+const LIVE_STALE_MS = 10 * 60 * 1000;
+
 export function createBot(token) {
   const bot = new Telegraf(token);
 
@@ -45,56 +47,24 @@ export function createBot(token) {
     }
 
     await ctx.reply(
-      "Квиток є.\n\n«М’яке повернення» — близько години. Це не екскурсія. Місто підставить декорації під тебе.\n\nПеред стартом надішли локацію ОДИН раз. Далі бот більше її не проситиме.\nКраще «трансляція геопозиції» на 1 годину — тоді маршрут точніший. Звичайна точка теж підійде.",
-      Markup.keyboard([[Markup.button.locationRequest("Надіслати, де я")]])
+      "Квиток є.\n\nНайкраще зараз увімкнути трансляцію гео на 1 годину:\nскріпка → Геопозиція → Транслювати геопозицію → 1 година.\n\nБот не вестиме за тобою в чаті. Просто запам’ятає, де ти є, і на кроці з кафе знайде заклад від тієї точки.\n\nЯкщо трансляцію не хочеш — натисни кнопку нижче. Тоді на кафе можу ще раз попросити «де ти».",
+      Markup.keyboard([[Markup.button.locationRequest("Надіслати одну точку")]])
         .resize()
         .oneTime()
     );
   });
 
   bot.on("location", async (ctx) => {
+    await handleIncomingLocation(ctx, ctx.message.location, ctx.message);
+  });
+
+  bot.on("edited_message", async (ctx) => {
+    const loc = ctx.editedMessage?.location;
+    if (!loc) return;
     const telegramId = ctx.from.id;
-    const ticket = ticketForUser(telegramId, adventure.id);
-    if (!ticket) {
-      await ctx.reply("Спочатку потрібен квиток з сайту.");
-      return;
-    }
-
-    const loc = ctx.message.location;
-    const start = { lat: loc.latitude, lon: loc.longitude };
-
-    updateStore((s) => {
-      s.sessions[telegramId] = {
-        adventureId: adventure.id,
-        step: 0,
-        start,
-        places: {},
-        answers: [],
-        startedAt: Date.now(),
-      };
-    });
-
-    await ctx.reply("Ок, старт зафіксовано. Шукаю точки поруч — якщо не встигну, дам карту.", Markup.removeKeyboard());
-
-    let places = {};
-    try {
-      places = await planPlaces(start, adventure.places_needed || []);
-    } catch (err) {
-      console.error(err);
-    }
-
-    updateStore((s) => {
-      if (s.sessions[telegramId]) s.sessions[telegramId].places = places;
-    });
-
-    const found = Object.values(places).filter(Boolean).length;
-    if (found) {
-      await ctx.reply(`Знайшов ${found} точк${found === 1 ? "у" : "и"} поруч.`);
-    } else {
-      await ctx.reply("Конкретну адресу зараз не знайшов. На кроках з місцем буде кнопка карти.");
-    }
-
-    await sendStep(ctx, telegramId);
+    const session = getStore().sessions[telegramId];
+    if (!session || session.finishedAt) return;
+    saveGeo(telegramId, loc);
   });
 
   bot.on("text", async (ctx) => {
@@ -140,6 +110,108 @@ export function createBot(token) {
   return bot;
 }
 
+function readGeo(loc) {
+  return { lat: loc.latitude, lon: loc.longitude };
+}
+
+function saveGeo(telegramId, loc) {
+  const geo = readGeo(loc);
+  const liveUntil = loc.live_period
+    ? Date.now() + Number(loc.live_period) * 1000
+    : null;
+  updateStore((s) => {
+    const session = s.sessions[telegramId];
+    if (!session) return;
+    session.current = geo;
+    session.geoAt = Date.now();
+    if (liveUntil) session.liveUntil = liveUntil;
+  });
+}
+
+function geoIsFresh(session) {
+  if (!session?.current) return false;
+  if (session.liveUntil && session.liveUntil > Date.now()) return true;
+  if (session.geoAt && Date.now() - session.geoAt < LIVE_STALE_MS) return true;
+  return false;
+}
+
+async function handleIncomingLocation(ctx, loc, rawMessage) {
+  const telegramId = ctx.from.id;
+  const ticket = ticketForUser(telegramId, adventure.id);
+  if (!ticket) {
+    await ctx.reply("Спочатку потрібен квиток з сайту.");
+    return;
+  }
+
+  const geo = readGeo(loc);
+  const existing = getStore().sessions[telegramId];
+
+  if (existing && !existing.finishedAt && existing.awaitingPlace) {
+    saveGeo(telegramId, loc);
+    updateStore((s) => {
+      s.sessions[telegramId].awaitingPlace = null;
+    });
+    await ctx.reply("Є свіжа точка. Шукаю місце поруч…", Markup.removeKeyboard());
+    await sendStep(ctx, telegramId);
+    return;
+  }
+
+  if (existing && !existing.finishedAt) {
+    saveGeo(telegramId, loc);
+    return;
+  }
+
+  const liveUntil = loc.live_period
+    ? Date.now() + Number(loc.live_period) * 1000
+    : null;
+
+  updateStore((s) => {
+    s.sessions[telegramId] = {
+      adventureId: adventure.id,
+      step: 0,
+      start: geo,
+      current: geo,
+      geoAt: Date.now(),
+      liveUntil,
+      places: {},
+      answers: [],
+      startedAt: Date.now(),
+    };
+  });
+
+  if (liveUntil) {
+    await ctx.reply(
+      "Трансляцію бачу. Далі кроки підуть текстом. Кафе підставлю вже від того місця, де ти будеш на тому кроці.",
+      Markup.removeKeyboard()
+    );
+  } else {
+    await ctx.reply(
+      "Точку прийняв. Якщо пройдеш далеко, на кроці кафе попрошу гео ще раз.",
+      Markup.removeKeyboard()
+    );
+  }
+
+  await sendStep(ctx, telegramId);
+}
+
+async function resolvePlaceForStep(session, step) {
+  if (!step?.place_key) return session.places || {};
+  const origin = session.current || session.start;
+  if (!origin) return session.places || {};
+  const need = (adventure.places_needed || []).find((p) => p.key === step.place_key) || {
+    key: step.place_key,
+    category: step.place_key,
+    radius_m: 1600,
+  };
+  try {
+    const found = await planPlaces(origin, [need]);
+    return { ...(session.places || {}), ...found };
+  } catch (err) {
+    console.error(err);
+    return session.places || {};
+  }
+}
+
 async function advance(ctx, telegramId) {
   const session = getStore().sessions[telegramId];
   if (!session) {
@@ -171,16 +243,38 @@ async function sendStep(ctx, telegramId) {
     return;
   }
 
+  if (step.type === "LOCATION" && step.place_key && !geoIsFresh(session)) {
+    updateStore((s) => {
+      s.sessions[telegramId].awaitingPlace = step.place_key;
+    });
+    await ctx.reply(
+      "Щоб дати кафе від тебе зараз, надішли гео ще раз.\nАбо увімкни трансляцію на годину: скріпка → Геопозиція → Транслювати.",
+      Markup.keyboard([[Markup.button.locationRequest("Я тут зараз")]])
+        .resize()
+        .oneTime()
+    );
+    return;
+  }
+
+  if (step.type === "LOCATION" && step.place_key) {
+    await ctx.reply("Шукаю найближче місце від тебе зараз…");
+    const places = await resolvePlaceForStep(session, step);
+    updateStore((s) => {
+      if (s.sessions[telegramId]) s.sessions[telegramId].places = places;
+    });
+  }
+
+  const fresh = getStore().sessions[telegramId];
   let text = step.text;
-  const cafe = session.places?.cafe;
-  const water = session.places?.water;
+  const cafe = fresh.places?.cafe;
+  const water = fresh.places?.water;
   text = text
     .replace("{cafe_name}", cafe?.name || "найближче кафе")
     .replace("{water_name}", water?.name || "найближча вода")
     .replace("{cafe_min}", cafe ? String(cafe.minutes) : "?")
     .replace("{water_min}", water ? String(water.minutes) : "?");
   if (step.place_key) {
-    const place = session.places?.[step.place_key];
+    const place = fresh.places?.[step.place_key];
     const line = place
       ? formatPlaceLine(place)
       : step.fallback || "Знайди місце сам. Є кнопка пошуку на карті.";
@@ -189,8 +283,8 @@ async function sendStep(ctx, telegramId) {
 
   const buttons = [];
   if (step.type === "LOCATION") {
-    const place = session.places?.[step.place_key];
-    const origin = session.start;
+    const place = fresh.places?.[step.place_key];
+    const origin = fresh.current || fresh.start;
     if (place?.maps) {
       buttons.push([Markup.button.url("Відкрити шлях", place.maps)]);
     } else {

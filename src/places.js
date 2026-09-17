@@ -81,7 +81,7 @@ async function geoapifySearch(category, lat, lon, radius) {
 
 export function formatPlaceLine(place) {
   if (!place) return "";
-  return `${place.name}. Приблизно ${place.minutes} хв пішки від старту.`;
+  return `${place.name}. Приблизно ${place.minutes} хв пішки звідси.`;
 }
 
 export function fallbackMapsQuery(category) {
