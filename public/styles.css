@@ -1,0 +1,64 @@
+:root {
+  --bg: #f4efe6;
+  --ink: #1c1915;
+  --mute: #6b645b;
+  --line: #ddd4c6;
+  --accent: #8b3a2f;
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body {
+  font-family: Georgia, "Times New Roman", serif;
+  background: var(--bg);
+  color: var(--ink);
+  line-height: 1.5;
+}
+
+main {
+  max-width: 40rem;
+  margin: 0 auto;
+  padding: 2.5rem 1.25rem 4rem;
+}
+
+.kicker {
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  font-family: system-ui, sans-serif;
+  font-size: 0.72rem;
+  color: var(--mute);
+}
+
+h1 { font-size: 2.1rem; font-weight: 500; margin: 0.4rem 0 1rem; }
+p { color: var(--ink); }
+.mute { color: var(--mute); }
+
+.card {
+  border-top: 1px solid var(--line);
+  padding-top: 1.2rem;
+  margin-top: 1.6rem;
+}
+
+.btn {
+  display: inline-block;
+  background: var(--accent);
+  color: #fff;
+  text-decoration: none;
+  padding: 0.75rem 1.1rem;
+  border: 0;
+  font-family: system-ui, sans-serif;
+  font-size: 0.95rem;
+  cursor: pointer;
+}
+
+input {
+  width: 100%;
+  padding: 0.7rem;
+  margin: 0.4rem 0 0.8rem;
+  border: 1px solid var(--line);
+  background: #fff;
+  font: inherit;
+}
+
+.steps { padding-left: 1.1rem; }
+.steps li { margin: 0.35rem 0; }

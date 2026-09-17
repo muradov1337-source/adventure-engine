@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="uk">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Видати квиток</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <main>
+    <div class="kicker">Адмінка</div>
+    <h1>Видати квиток</h1>
+    <p class="mute">Після оплати вставляєте секрет і отримуєте посилання клієнту. Не публікуйте цю сторінку.</p>
+    <form id="f">
+      <label>Секрет</label>
+      <input name="secret" type="password" required />
+      <label>Нотатка (ім’я покупця)</label>
+      <input name="note" placeholder="Оля, оплата 16.09" />
+      <button class="btn" type="submit">Створити посилання</button>
+    </form>
+    <p id="out"></p>
+  </main>
+  <script>
+    document.getElementById("f").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const body = Object.fromEntries(new FormData(e.target));
+      const res = await fetch("/api/ticket", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const data = await res.json();
+      document.getElementById("out").textContent = res.ok
+        ? data.link
+        : (data.error || "Помилка");
+    });
+  </script>
+</body>
+</html>
