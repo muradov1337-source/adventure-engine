@@ -1,11 +1,11 @@
-const OVERPASS = "https://overpass.kumi.systems/api/interpreter";
-const FETCH_MS = 6000;
-const PLAN_MS = 9000;
+const FETCH_MS = 4000;
+const PLAN_MS = 7000;
 
-const QUERIES = {
-  cafe: (lat, lon, r) => `[out:json][timeout:5];(node["amenity"="cafe"](around:${r},${lat},${lon}););out center 5;`,
-  bench: (lat, lon, r) => `[out:json][timeout:5];(node["amenity"="bench"](around:${r},${lat},${lon});node["leisure"="park"](around:${r},${lat},${lon}););out center 5;`,
-  water: (lat, lon, r) => `[out:json][timeout:5];(node["amenity"="fountain"](around:${r},${lat},${lon}););out center 5;`,
+const CATEGORIES = {
+  cafe: "catering.cafe,catering.cafe.coffee,catering.cafe.coffee_shop",
+  water:
+    "natural.water,natural.water.sea,natural.water.river_system,natural.water.spring,beach,leisure.swimming_pool",
+  bench: "leisure.park,leisure.picnic",
 };
 
 function distM(a, b) {
@@ -34,54 +34,47 @@ function mapsPlaceLink(lat, lon, name) {
   return `https://www.google.com/maps/search/?api=1&query=${q}&query_lat=${lat}&query_lon=${lon}`;
 }
 
-function defaultName(category) {
-  if (category === "cafe") return "кав’ярня поруч";
-  if (category === "bench") return "лавка або парк поруч";
-  if (category === "water") return "вода поруч";
-  return "місце поруч";
-}
-
-async function fetchJson(url, options = {}) {
+async function fetchJson(url) {
   const res = await fetch(url, {
-    ...options,
     signal: AbortSignal.timeout(FETCH_MS),
+    headers: { "User-Agent": "adventure-engine/0.4" },
   });
   if (!res.ok) throw new Error(`http ${res.status}`);
   return res.json();
 }
 
-function normalizeElement(el, origin, category) {
-  const lat = el.lat || el.center?.lat;
-  const lon = el.lon || el.center?.lon;
-  if (!lat || !lon) return null;
-  const name = el.tags?.name || el.tags?.["name:uk"] || null;
-  const meters = Math.round(distM(origin, { lat, lon }));
-  return {
-    name: name || defaultName(category),
-    lat,
-    lon,
-    meters,
-    minutes: walkMin(meters),
-    maps: mapsPlaceLink(lat, lon, name),
-    category,
-    exact: Boolean(name),
-  };
-}
+async function geoapifySearch(category, lat, lon, radius) {
+  const key = process.env.GEOAPIFY_KEY;
+  if (!key) return [];
+  const cats = CATEGORIES[category] || category;
+  const url = new URL("https://api.geoapify.com/v2/places");
+  url.searchParams.set("categories", cats);
+  url.searchParams.set("filter", `circle:${lon},${lat},${radius}`);
+  url.searchParams.set("bias", `proximity:${lon},${lat}`);
+  url.searchParams.set("limit", "5");
+  url.searchParams.set("lang", "uk");
+  url.searchParams.set("apiKey", key);
 
-async function overpassSearch(category, lat, lon, radius) {
-  const builder = QUERIES[category];
-  if (!builder) return [];
-  const json = await fetchJson(OVERPASS, {
-    method: "POST",
-    headers: {
-      "Content-Type": "text/plain",
-      "User-Agent": "adventure-engine/0.3",
-    },
-    body: builder(lat, lon, radius),
-  });
+  const json = await fetchJson(url);
   const origin = { lat, lon };
-  return (json.elements || [])
-    .map((el) => normalizeElement(el, origin, category))
+  return (json.features || [])
+    .map((f) => {
+      const [plon, plat] = f.geometry?.coordinates || [];
+      const p = f.properties || {};
+      if (!plat || !plon) return null;
+      const name = p.name || p.address_line1 || null;
+      const meters = Math.round(p.distance || distM(origin, { lat: plat, lon: plon }));
+      return {
+        name: name || (category === "cafe" ? "кав’ярня поруч" : category === "water" ? "вода поруч" : "місце поруч"),
+        lat: plat,
+        lon: plon,
+        meters,
+        minutes: walkMin(meters),
+        maps: mapsPlaceLink(plat, plon, name),
+        category,
+        exact: Boolean(p.name),
+      };
+    })
     .filter(Boolean)
     .sort((a, b) => a.meters - b.meters);
 }
@@ -94,7 +87,7 @@ export function formatPlaceLine(place) {
 export function fallbackMapsQuery(category) {
   if (category === "cafe") return "кафе";
   if (category === "bench") return "парк";
-  if (category === "water") return "фонтан";
+  if (category === "water") return "озеро OR фонтан OR річка";
   return "місце";
 }
 
@@ -107,14 +100,15 @@ async function withBudget(promise, ms) {
 
 export async function planPlaces(origin, needed) {
   const planned = {};
+  if (!needed?.length) return planned;
   try {
     const jobs = needed.map(async (need) => {
       try {
-        const found = await overpassSearch(
+        const found = await geoapifySearch(
           need.category,
           origin.lat,
           origin.lon,
-          need.radius_m || 1200
+          need.radius_m || 1500
         );
         return [need.key, found[0] || null];
       } catch (err) {

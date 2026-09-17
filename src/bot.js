@@ -172,6 +172,13 @@ async function sendStep(ctx, telegramId) {
   }
 
   let text = step.text;
+  const cafe = session.places?.cafe;
+  const water = session.places?.water;
+  text = text
+    .replace("{cafe_name}", cafe?.name || "найближче кафе")
+    .replace("{water_name}", water?.name || "найближча вода")
+    .replace("{cafe_min}", cafe ? String(cafe.minutes) : "?")
+    .replace("{water_min}", water ? String(water.minutes) : "?");
   if (step.place_key) {
     const place = session.places?.[step.place_key];
     const line = place
