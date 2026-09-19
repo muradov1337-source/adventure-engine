@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { getStore, updateStore } from "./store.js";
 import { bindTicket, ticketForUser, spendTicket } from "./tickets.js";
-import { planPlaces, formatPlaceLine, mapsSearchLink, fallbackMapsQuery } from "./places.js";
+import { planPlaces, formatPlaceLine, mapsSearchLink, fallbackMapsQuery, walkingDirectionsLink } from "./places.js";
 import { nextDeparture } from "./transit.js";
 
 const adventure = JSON.parse(
@@ -292,7 +292,6 @@ async function sendStep(ctx, telegramId) {
   }
 
   if (step.type === "LOCATION" && step.place_key) {
-    await ctx.reply("Шукаю найближче місце від тебе зараз…");
     const places = await resolvePlaceForStep(session, step);
     updateStore((s) => {
       if (s.sessions[telegramId]) s.sessions[telegramId].places = places;
@@ -362,8 +361,9 @@ async function sendStep(ctx, telegramId) {
   if (step.type === "LOCATION") {
     const place = fresh.places?.[step.place_key];
     const origin = fresh.current || fresh.start;
-    if (place?.maps) {
-      buttons.push([Markup.button.url("Дивитись на мапі", place.maps)]);
+    const walk = walkingDirectionsLink(origin, place);
+    if (walk) {
+      buttons.push([Markup.button.url("Дивитись на мапі", walk)]);
     } else {
       const q = fallbackMapsQuery(step.place_key);
       buttons.push([Markup.button.url("Дивитись на мапі", mapsSearchLink(q, origin))]);

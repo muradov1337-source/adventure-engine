@@ -31,9 +31,22 @@ export function mapsSearchLink(query, origin) {
   return `https://www.google.com/maps/search/${q}/@${origin.lat},${origin.lon},16z`;
 }
 
+export function walkingDirectionsLink(origin, dest) {
+  if (!dest?.lat || !dest?.lon) return null;
+  const params = new URLSearchParams({
+    api: "1",
+    destination: `${dest.lat},${dest.lon}`,
+    travelmode: "walking",
+  });
+  if (origin?.lat && origin?.lon) {
+    params.set("origin", `${origin.lat},${origin.lon}`);
+  }
+  return `https://www.google.com/maps/dir/?${params.toString()}`;
+}
+
 function mapsPlaceLink(lat, lon, name) {
-  const q = encodeURIComponent(name || `${lat},${lon}`);
-  return `https://www.google.com/maps/search/?api=1&query=${q}&query_lat=${lat}&query_lon=${lon}`;
+  return walkingDirectionsLink(null, { lat, lon, name }) ||
+    `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(name || `${lat},${lon}`)}`;
 }
 
 async function fetchJson(url) {
