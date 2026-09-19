@@ -4,6 +4,7 @@ import path from "node:path";
 import { getStore, updateStore } from "./store.js";
 import { bindTicket, ticketForUser, spendTicket } from "./tickets.js";
 import { planPlaces, formatPlaceLine, mapsSearchLink, fallbackMapsQuery } from "./places.js";
+import { nextDeparture } from "./transit.js";
 
 const adventure = JSON.parse(
   fs.readFileSync(path.resolve("adventures/soft-return.json"), "utf8")
@@ -38,7 +39,7 @@ export function createBot(token) {
     if (!ticket) {
       const site = process.env.PUBLIC_URL || "";
       await ctx.reply(
-        "Це бот пригоди «М’яке повернення».\n\nБез квитка кроки не відкриваються.\nОплати на сайті — і повернись сюди з посилання після оплати.",
+        "Це бот пригоди.\n\nБез квитка кроки не відкриваються.\nОплати на сайті — і повернись сюди з посилання після оплати.",
         site
           ? Markup.inlineKeyboard([[Markup.button.url("Відкрити сайт", site)]])
           : undefined
@@ -46,16 +47,27 @@ export function createBot(token) {
       return;
     }
 
-    await ctx.reply(
-      "Квиток є.\n\nНайкраще зараз увімкнути трансляцію гео на 1 годину:\nскріпка → Геопозиція → Транслювати геопозицію → 1 година.\n\nБот не вестиме за тобою в чаті. Просто запам’ятає, де ти є, і на кроці з кафе знайде заклад від тієї точки.\n\nЯкщо трансляцію не хочеш — натисни кнопку нижче. Тоді на кафе можу ще раз попросити «де ти».",
-      Markup.keyboard([[Markup.button.locationRequest("Надіслати одну точку")]])
-        .resize()
-        .oneTime()
-    );
+    updateStore((s) => {
+      s.sessions[telegramId] = {
+        adventureId: adventure.id,
+        step: 0,
+        gender: null,
+        start: null,
+        current: null,
+        geoAt: null,
+        liveUntil: null,
+        places: {},
+        answers: [],
+        transit: null,
+        startedAt: Date.now(),
+      };
+    });
+
+    await sendStep(ctx, telegramId);
   });
 
   bot.on("location", async (ctx) => {
-    await handleIncomingLocation(ctx, ctx.message.location, ctx.message);
+    await handleIncomingLocation(ctx, ctx.message.location);
   });
 
   bot.on("edited_message", async (ctx) => {
@@ -70,10 +82,10 @@ export function createBot(token) {
   bot.on("text", async (ctx) => {
     const telegramId = ctx.from.id;
     const session = getStore().sessions[telegramId];
-    if (!session) return;
+    if (!session || session.finishedAt) return;
     const step = adventure.steps[session.step];
     if (!step) return;
-    if (step.type === "INPUT") {
+    if (step.type === "NOTE" || step.type === "INPUT") {
       updateStore((s) => {
         s.sessions[telegramId].answers.push({
           step: step.id,
@@ -94,8 +106,20 @@ export function createBot(token) {
     await advance(ctx, ctx.from.id);
   });
 
+  bot.action("gender:female", async (ctx) => {
+    await ctx.answerCbQuery();
+    setGender(ctx.from.id, "female");
+    await advance(ctx, ctx.from.id);
+  });
+
+  bot.action("gender:male", async (ctx) => {
+    await ctx.answerCbQuery();
+    setGender(ctx.from.id, "male");
+    await advance(ctx, ctx.from.id);
+  });
+
   bot.command("pause", async (ctx) => {
-    await ctx.reply("Сеанс стоїть. Напиши /continue коли будеш готовий.");
+    await ctx.reply("Сеанс стоїть. Напиши /continue коли будеш готова або готовий.");
   });
 
   bot.command("continue", async (ctx) => {
@@ -108,6 +132,12 @@ export function createBot(token) {
   });
 
   return bot;
+}
+
+function setGender(telegramId, gender) {
+  updateStore((s) => {
+    if (s.sessions[telegramId]) s.sessions[telegramId].gender = gender;
+  });
 }
 
 function readGeo(loc) {
@@ -124,6 +154,7 @@ function saveGeo(telegramId, loc) {
     if (!session) return;
     session.current = geo;
     session.geoAt = Date.now();
+    if (!session.start) session.start = geo;
     if (liveUntil) session.liveUntil = liveUntil;
   });
 }
@@ -135,7 +166,17 @@ function geoIsFresh(session) {
   return false;
 }
 
-async function handleIncomingLocation(ctx, loc, rawMessage) {
+function stepText(step, gender) {
+  if (gender === "female" && step.text_female) return step.text_female;
+  return step.text;
+}
+
+function stepButton(step, gender) {
+  if (gender === "female" && step.button_female) return step.button_female;
+  return step.button || "Далі";
+}
+
+async function handleIncomingLocation(ctx, loc) {
   const telegramId = ctx.from.id;
   const ticket = ticketForUser(telegramId, adventure.id);
   if (!ticket) {
@@ -143,55 +184,25 @@ async function handleIncomingLocation(ctx, loc, rawMessage) {
     return;
   }
 
-  const geo = readGeo(loc);
-  const existing = getStore().sessions[telegramId];
+  const session = getStore().sessions[telegramId];
+  if (!session || session.finishedAt) {
+    await ctx.reply("Натисни /start, щоб почати пригоду.");
+    return;
+  }
 
-  if (existing && !existing.finishedAt && existing.awaitingPlace) {
-    saveGeo(telegramId, loc);
+  saveGeo(telegramId, loc);
+
+  if (session.awaitingPlace || adventure.steps[session.step]?.type === "GEO") {
     updateStore((s) => {
-      s.sessions[telegramId].awaitingPlace = null;
+      if (s.sessions[telegramId]) s.sessions[telegramId].awaitingPlace = null;
     });
-    await ctx.reply("Є свіжа точка. Шукаю місце поруч…", Markup.removeKeyboard());
-    await sendStep(ctx, telegramId);
-    return;
+    await ctx.reply("Місце бачу.", Markup.removeKeyboard());
+    if (adventure.steps[session.step]?.type === "GEO") {
+      await advance(ctx, telegramId);
+    } else {
+      await sendStep(ctx, telegramId);
+    }
   }
-
-  if (existing && !existing.finishedAt) {
-    saveGeo(telegramId, loc);
-    return;
-  }
-
-  const liveUntil = loc.live_period
-    ? Date.now() + Number(loc.live_period) * 1000
-    : null;
-
-  updateStore((s) => {
-    s.sessions[telegramId] = {
-      adventureId: adventure.id,
-      step: 0,
-      start: geo,
-      current: geo,
-      geoAt: Date.now(),
-      liveUntil,
-      places: {},
-      answers: [],
-      startedAt: Date.now(),
-    };
-  });
-
-  if (liveUntil) {
-    await ctx.reply(
-      "Трансляцію бачу. Далі кроки підуть текстом. Кафе підставлю вже від того місця, де ти будеш на тому кроці.",
-      Markup.removeKeyboard()
-    );
-  } else {
-    await ctx.reply(
-      "Точку прийняв. Якщо пройдеш далеко, на кроці кафе попрошу гео ще раз.",
-      Markup.removeKeyboard()
-    );
-  }
-
-  await sendStep(ctx, telegramId);
 }
 
 async function resolvePlaceForStep(session, step) {
@@ -225,12 +236,15 @@ async function advance(ctx, telegramId) {
     updateStore((s) => {
       s.sessions[telegramId].finishedAt = Date.now();
     });
-    await ctx.reply("Квиток на цю пригоду закрито. Дякую, що вийшла.");
     return;
   }
 
   updateStore((s) => {
-    s.sessions[telegramId].step += 1;
+    const sess = s.sessions[telegramId];
+    sess.step += 1;
+    if (current?.refresh_geo_after && !(sess.liveUntil && sess.liveUntil > Date.now())) {
+      sess.geoAt = 0;
+    }
   });
   await sendStep(ctx, telegramId);
 }
@@ -243,13 +257,34 @@ async function sendStep(ctx, telegramId) {
     return;
   }
 
-  if (step.type === "LOCATION" && step.place_key && !geoIsFresh(session)) {
+  const gender = session.gender;
+
+  if (step.type === "END") {
+    spendTicket(telegramId, adventure.id);
     updateStore((s) => {
-      s.sessions[telegramId].awaitingPlace = step.place_key;
+      s.sessions[telegramId].finishedAt = Date.now();
+    });
+    await ctx.reply(stepText(step, gender));
+    return;
+  }
+
+  if (step.type === "GEO") {
+    await ctx.reply(
+      stepText(step, gender),
+      Markup.keyboard([[Markup.button.locationRequest("Поділитись")]])
+        .resize()
+        .oneTime()
+    );
+    return;
+  }
+
+  if ((step.type === "LOCATION" || step.refresh_geo_after) && step.place_key && !geoIsFresh(session)) {
+    updateStore((s) => {
+      s.sessions[telegramId].awaitingPlace = step.place_key || "now";
     });
     await ctx.reply(
-      "Щоб дати кафе від тебе зараз, надішли гео ще раз.\nАбо увімкни трансляцію на годину: скріпка → Геопозиція → Транслювати.",
-      Markup.keyboard([[Markup.button.locationRequest("Я тут зараз")]])
+      "Щоб вести далі, потрібне місце, де ти зараз. Поділись місцезнаходженням ще раз.\n\nАбо увімкни трансляцію на годину: скріпка → Геопозиція → Транслювати геопозицію → 1 година.",
+      Markup.keyboard([[Markup.button.locationRequest("Поділитись")]])
         .resize()
         .oneTime()
     );
@@ -264,15 +299,35 @@ async function sendStep(ctx, telegramId) {
     });
   }
 
+  if (step.id === "ride") {
+    const origin = session.current || session.start;
+    let transit = null;
+    if (origin) transit = await nextDeparture(origin.lat, origin.lon);
+    updateStore((s) => {
+      if (s.sessions[telegramId]) s.sessions[telegramId].transit = transit;
+    });
+  }
+
   const fresh = getStore().sessions[telegramId];
-  let text = step.text;
+  let text = stepText(step, gender);
+  if (step.id === "ride" && fresh.transit && step.text_gtfs) {
+    text = step.text_gtfs
+      .replace("{route_type}", fresh.transit.type || "маршрут")
+      .replace("{route_no}", fresh.transit.no || "")
+      .replace("{eta}", fresh.transit.eta || "");
+  }
+
+  const stop = fresh.places?.stop;
+  const park = fresh.places?.park;
   const cafe = fresh.places?.cafe;
-  const water = fresh.places?.water;
   text = text
+    .replace("{stop_name}", stop?.name || "найближча зупинка")
+    .replace("{stop_min}", stop ? `${stop.minutes} хв` : "кількох хвилинах")
+    .replace("{park_name}", park?.name || "найближчий парк або сквер")
     .replace("{cafe_name}", cafe?.name || "найближче кафе")
-    .replace("{water_name}", water?.name || "найближча вода")
     .replace("{cafe_min}", cafe ? String(cafe.minutes) : "?")
-    .replace("{water_min}", water ? String(water.minutes) : "?");
+    .replace("{walk_min}", String(stop?.minutes || park?.minutes || cafe?.minutes || "?"));
+
   if (step.place_key) {
     const place = fresh.places?.[step.place_key];
     const line = place
@@ -281,22 +336,58 @@ async function sendStep(ctx, telegramId) {
     text = text.replace("{place_line}", line);
   }
 
+  if (step.type === "MEDIA") {
+    await ctx.reply(text);
+    await sendParkAudio(ctx);
+    await ctx.reply("Коли файл скінчиться — тисни «Далі».", Markup.inlineKeyboard([
+      [Markup.button.callback(stepButton(step, gender), "next")],
+    ]));
+    return;
+  }
+
+  if (step.type === "NOTE" || step.type === "INPUT") {
+    await ctx.reply(text);
+    return;
+  }
+
   const buttons = [];
+  if (step.type === "CHOOSE" && step.choices) {
+    buttons.push(
+      step.choices.map((c) => Markup.button.callback(c.label, `gender:${c.id}`))
+    );
+    await ctx.reply(text, Markup.inlineKeyboard(buttons));
+    return;
+  }
+
   if (step.type === "LOCATION") {
     const place = fresh.places?.[step.place_key];
     const origin = fresh.current || fresh.start;
     if (place?.maps) {
-      buttons.push([Markup.button.url("Відкрити шлях", place.maps)]);
+      buttons.push([Markup.button.url("Дивитись на мапі", place.maps)]);
     } else {
       const q = fallbackMapsQuery(step.place_key);
-      buttons.push([Markup.button.url("Знайти на карті", mapsSearchLink(q, origin))]);
+      buttons.push([Markup.button.url("Дивитись на мапі", mapsSearchLink(q, origin))]);
     }
-    buttons.push([Markup.button.callback(step.button || "Я тут", "here")]);
-  } else if (step.type === "INPUT") {
-    buttons.push([Markup.button.callback(step.button || "Далі", "next")]);
+    buttons.push([Markup.button.callback(stepButton(step, gender), "here")]);
   } else {
-    buttons.push([Markup.button.callback(step.button || "Далі", "next")]);
+    buttons.push([Markup.button.callback(stepButton(step, gender), "next")]);
   }
 
   await ctx.reply(text, Markup.inlineKeyboard(buttons));
+}
+
+async function sendParkAudio(ctx) {
+  const fileId = process.env.PARK_AUDIO_FILE_ID;
+  const local = path.resolve("media/park.ogg");
+  try {
+    if (fileId) {
+      await ctx.replyWithVoice(fileId);
+      return;
+    }
+    if (fs.existsSync(local)) {
+      await ctx.replyWithVoice({ source: fs.createReadStream(local) });
+    }
+  } catch (err) {
+    console.error("audio", err.message);
+  }
 }

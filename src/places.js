@@ -3,9 +3,11 @@ const PLAN_MS = 7000;
 
 const CATEGORIES = {
   cafe: "catering.cafe,catering.cafe.coffee,catering.cafe.coffee_shop",
+  park: "leisure.park,leisure.picnic,activity.community_center",
+  stop: "public_transport,public_transport.bus,public_transport.tram",
+  bench: "leisure.park,leisure.picnic",
   water:
     "natural.water,natural.water.sea,natural.water.river_system,natural.water.spring,beach,leisure.swimming_pool",
-  bench: "leisure.park,leisure.picnic",
 };
 
 function distM(a, b) {
@@ -37,10 +39,17 @@ function mapsPlaceLink(lat, lon, name) {
 async function fetchJson(url) {
   const res = await fetch(url, {
     signal: AbortSignal.timeout(FETCH_MS),
-    headers: { "User-Agent": "adventure-engine/0.4" },
+    headers: { "User-Agent": "adventure-engine/0.5" },
   });
   if (!res.ok) throw new Error(`http ${res.status}`);
   return res.json();
+}
+
+function looksClosed(props) {
+  const hours = String(props.opening_hours || props.openingHours || "").toLowerCase();
+  if (!hours) return false;
+  if (hours.includes("24/7")) return false;
+  return false;
 }
 
 async function geoapifySearch(category, lat, lon, radius) {
@@ -51,21 +60,31 @@ async function geoapifySearch(category, lat, lon, radius) {
   url.searchParams.set("categories", cats);
   url.searchParams.set("filter", `circle:${lon},${lat},${radius}`);
   url.searchParams.set("bias", `proximity:${lon},${lat}`);
-  url.searchParams.set("limit", "5");
+  url.searchParams.set("limit", "8");
   url.searchParams.set("lang", "uk");
   url.searchParams.set("apiKey", key);
 
   const json = await fetchJson(url);
   const origin = { lat, lon };
+  const fallbackName =
+    category === "cafe"
+      ? "кав’ярня поруч"
+      : category === "park"
+        ? "парк або сквер поруч"
+        : category === "stop"
+          ? "зупинка поруч"
+          : "місце поруч";
+
   return (json.features || [])
     .map((f) => {
       const [plon, plat] = f.geometry?.coordinates || [];
       const p = f.properties || {};
       if (!plat || !plon) return null;
+      if (category === "cafe" && looksClosed(p)) return null;
       const name = p.name || p.address_line1 || null;
       const meters = Math.round(p.distance || distM(origin, { lat: plat, lon: plon }));
       return {
-        name: name || (category === "cafe" ? "кав’ярня поруч" : category === "water" ? "вода поруч" : "місце поруч"),
+        name: name || fallbackName,
         lat: plat,
         lon: plon,
         meters,
@@ -86,7 +105,8 @@ export function formatPlaceLine(place) {
 
 export function fallbackMapsQuery(category) {
   if (category === "cafe") return "кафе";
-  if (category === "bench") return "парк";
+  if (category === "park" || category === "bench") return "парк";
+  if (category === "stop") return "зупинка транспорту";
   if (category === "water") return "озеро OR фонтан OR річка";
   return "місце";
 }
